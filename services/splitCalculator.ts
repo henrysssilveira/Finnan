@@ -1,4 +1,4 @@
-import type { IncomeDate, SplitInstallment } from '../types/finance';
+import type { IncomeDate, SplitInstallment, PaymentMode } from '../types/finance';
 
 /**
  * Retorna o número de meses entre duas datas (mínimo 1)
@@ -17,7 +17,6 @@ export function calculateMonthsDifference(startDate: Date, endDate: Date): numbe
  * Ajusta o dia para não ultrapassar os dias válidos do mês (ex: 30 de fevereiro -> 28/29)
  */
 export function getSafeDate(year: number, month: number, targetDay: number): Date {
-  // Último dia do mês: passar month + 1 e dia 0
   const lastDayOfMonth = new Date(year, month + 1, 0).getDate();
   const day = Math.min(targetDay, lastDayOfMonth);
   return new Date(year, month, day);
@@ -36,6 +35,8 @@ export function formatDateISO(date: Date): string {
 export interface GenerateInstallmentsParams {
   stepId: string;
   totalAmount: number;
+  paymentMode?: PaymentMode;
+  singleDueDate?: string;
   startDate?: Date;
   deadlineDate: string; // YYYY-MM-DD
   incomeDates: IncomeDate[];
@@ -43,19 +44,40 @@ export interface GenerateInstallmentsParams {
 
 /**
  * Calcula determinísticamente as parcelas e splits de pagamento.
- * Divide o valor total pelos meses até a data limite e distribui
- * entre os dias de recebimento cadastrados com suas porcentagens.
+ * Se paymentMode === 'single' (à vista), gera 1 parcela única na data informada.
+ * Se paymentMode === 'split', divide o valor total pelos meses e distribui
+ * entre as datas de recebimento configuradas com suas respectivas porcentagens.
  */
 export function generateSplitInstallments({
   stepId,
   totalAmount,
+  paymentMode = 'split',
+  singleDueDate,
   startDate = new Date(),
   deadlineDate,
   incomeDates,
 }: GenerateInstallmentsParams): SplitInstallment[] {
   if (totalAmount <= 0) return [];
 
-  // Se não houver datas cadastradas, cria um split padrão para o dia 10 (100%)
+  // Modo Pagamento Único / À Vista (Sem divisão)
+  if (paymentMode === 'single') {
+    const targetDateStr = singleDueDate || deadlineDate || formatDateISO(startDate);
+    const [tY, tM, tD] = targetDateStr.split('-').map(Number);
+    const dueDay = tD || 10;
+
+    return [
+      {
+        id: `inst_${stepId}_single_${Math.random().toString(36).substr(2, 5)}`,
+        stepId,
+        dueDate: targetDateStr,
+        incomeDay: dueDay,
+        amount: totalAmount,
+        isPaid: false,
+      },
+    ];
+  }
+
+  // Modo Split Sequencial
   const effectiveSplits = incomeDates.length > 0
     ? [...incomeDates].sort((a, b) => a.day - b.day)
     : [{ day: 10, percentage: 100 }];
@@ -67,7 +89,7 @@ export function generateSplitInstallments({
     percentage: totalPercentage > 0 ? (item.percentage / totalPercentage) * 100 : 100 / effectiveSplits.length,
   }));
 
-  const [dYear, dMonth, dDay] = deadlineDate.split('-').map(Number);
+  const [dYear, dMonth, dDay] = (deadlineDate || formatDateISO(startDate)).split('-').map(Number);
   const deadline = new Date(dYear || startDate.getFullYear(), ((dMonth || 1) - 1), dDay || 1);
   const monthsCount = calculateMonthsDifference(startDate, deadline);
 
@@ -92,7 +114,6 @@ export function generateSplitInstallments({
 
       let installmentCentavos: number;
       if (isLastInstallment) {
-        // A última parcela absorve os centavos restantes para fechar exatamente o valor total
         installmentCentavos = remainingTotalCentavos;
       } else {
         const rawPortion = (monthlyAmount * (splitRule.percentage / 100));

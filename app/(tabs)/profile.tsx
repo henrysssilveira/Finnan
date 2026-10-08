@@ -14,14 +14,24 @@ import { useFinanceStore } from '@/stores/financeStore';
 import { useAuthStore } from '@/stores/authStore';
 import Colors from '@/constants/Colors';
 import { useColorScheme } from '@/components/useColorScheme';
-import { IncomeDate, BankAccount, Debt } from '@/types/finance';
+import { IncomeDate, BankAccount, Debt, Planning } from '@/types/finance';
+import { PlanningModal } from '@/components/PlanningModal';
+import { formatCurrencyBRL, formatDateBR } from '@/services/splitCalculator';
 
 export default function ProfileScreen() {
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme];
 
-  const { profile, updateProfile, addBank, removeBank, addDebt, removeDebt, setIncomeDates, resetAll } =
-    useFinanceStore();
+  const {
+    profile,
+    plannings,
+    updateProfile,
+    addBank,
+    removeBank,
+    deletePlanning,
+    setIncomeDates,
+    resetAll,
+  } = useFinanceStore();
   const {
     lock,
     biometricsEnabled,
@@ -39,10 +49,10 @@ export default function ProfileScreen() {
   const [tempIncomeDates, setTempIncomeDates] = useState<IncomeDate[]>(profile.incomeDates);
   const [isEditingDates, setIsEditingDates] = useState(false);
 
-  // Estados de novos bancos e dívidas
+  // Estados de novos bancos e modal de planejamento de dívidas
   const [newBankName, setNewBankName] = useState('');
-  const [newDebtTitle, setNewDebtTitle] = useState('');
-  const [newDebtAmountStr, setNewDebtAmountStr] = useState('');
+  const [isDebtPlanModalVisible, setIsDebtPlanModalVisible] = useState(false);
+  const [editingDebtPlan, setEditingDebtPlan] = useState<Planning | null>(null);
 
   // Estados de PIN
   const [isChangingPin, setIsChangingPin] = useState(false);
@@ -99,21 +109,6 @@ export default function ProfileScreen() {
     setNewBankName('');
   };
 
-  // Adicionar Dívida
-  const handleAddDebt = async () => {
-    const amount = parseFloat(newDebtAmountStr.replace(',', '.'));
-    if (!newDebtTitle.trim() || isNaN(amount) || amount <= 0) {
-      Alert.alert('Dados inválidos', 'Informe a descrição e o valor da dívida.');
-      return;
-    }
-    await addDebt({
-      title: newDebtTitle.trim(),
-      totalAmount: amount,
-      remainingAmount: amount,
-    });
-    setNewDebtTitle('');
-    setNewDebtAmountStr('');
-  };
 
   // Salvar Novo PIN de 8 dígitos
   const handleSaveNewPin = async () => {
@@ -298,51 +293,142 @@ export default function ProfileScreen() {
         </View>
       </View>
 
-      {/* SEÇÃO 3: DÍVIDAS ATUAIS CONHECIDAS */}
+      {/* SEÇÃO 3: DÍVIDAS & PLANEJAMENTO COMPLETO */}
       <View style={[styles.card, { backgroundColor: theme.cardBackground, borderColor: theme.border }]}>
-        <View style={styles.cardHeader}>
-          <Ionicons name="alert-circle-outline" size={20} color={Colors.danger} />
-          <Text style={[styles.cardTitle, { color: theme.text }]}>Dívidas Atuais Conhecidas</Text>
+        <View style={styles.cardHeaderBetween}>
+          <View style={styles.cardTitleWrap}>
+            <Ionicons name="alert-circle-outline" size={20} color={Colors.danger} />
+            <Text style={[styles.cardTitle, { color: theme.text }]} numberOfLines={1}>
+              Dívidas & Planejamento
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.addDebtBtnHeader}
+            onPress={() => {
+              setEditingDebtPlan(null);
+              setIsDebtPlanModalVisible(true);
+            }}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="add" size={16} color="#FFF" />
+            <Text style={styles.addDebtBtnHeaderText}>Planejar Dívida</Text>
+          </TouchableOpacity>
         </View>
 
-        <View style={{ gap: 8, marginBottom: 12 }}>
-          <TextInput
-            style={[styles.inputInline, { backgroundColor: theme.inputBg, color: theme.text, borderColor: theme.border }]}
-            placeholder="Título da dívida (ex: Financiamento)"
-            placeholderTextColor={theme.textSecondary}
-            value={newDebtTitle}
-            onChangeText={setNewDebtTitle}
-          />
-          <View style={styles.addInlineRow}>
-            <TextInput
-              style={[styles.inputInline, { flex: 1, backgroundColor: theme.inputBg, color: theme.text, borderColor: theme.border }]}
-              placeholder="Valor total (R$)"
-              placeholderTextColor={theme.textSecondary}
-              keyboardType="decimal-pad"
-              value={newDebtAmountStr}
-              onChangeText={setNewDebtAmountStr}
-            />
-            <TouchableOpacity style={styles.addBtnSmall} onPress={handleAddDebt}>
-              <Text style={styles.addBtnSmallText}>+ Dívida</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
+        {plannings
+          .filter((p) => p.category === 'Dívidas')
+          .map((plan) => {
+            const isDirect = plan.type === 'direct';
+            let totalAmount = 0;
+            let totalPaid = 0;
+            let totalInstallmentsCount = 0;
 
-        {profile.debts.map((d) => (
-          <View key={d.id} style={[styles.debtRow, { borderColor: theme.border }]}>
-            <View>
-              <Text style={[styles.debtTitle, { color: theme.text }]}>{d.title}</Text>
-              <Text style={[styles.debtValue, { color: Colors.danger }]}>
-                R$ {d.totalAmount.toFixed(2)}
-              </Text>
-            </View>
-            <TouchableOpacity onPress={() => removeDebt(d.id)}>
-              <Ionicons name="trash-outline" size={18} color={Colors.danger} />
-            </TouchableOpacity>
-          </View>
-        ))}
-        {profile.debts.length === 0 && (
-          <Text style={[styles.emptyHint, { color: theme.textSecondary }]}>Nenhuma dívida registrada.</Text>
+            if (isDirect) {
+              totalAmount = plan.totalAmount || 0;
+              const installments = plan.directInstallments || [];
+              totalInstallmentsCount = installments.length;
+              totalPaid = installments
+                .filter((i) => i.isPaid)
+                .reduce((acc, curr) => acc + curr.amount, 0);
+            } else {
+              totalAmount = (plan.steps || []).reduce((s, st) => s + st.totalAmount, 0);
+              const allInst = (plan.steps || []).flatMap((st) => st.installments);
+              totalInstallmentsCount = allInst.length;
+              totalPaid = allInst
+                .filter((i) => i.isPaid)
+                .reduce((acc, curr) => acc + curr.amount, 0);
+            }
+
+            const remaining = Math.max(0, totalAmount - totalPaid);
+            const bankName = plan.bankAccountId ? profile.banks.find((b) => b.id === plan.bankAccountId)?.name : undefined;
+
+            return (
+              <TouchableOpacity
+                key={plan.id}
+                style={[styles.debtCardItem, { borderColor: theme.border, backgroundColor: theme.inputBg }]}
+                onPress={() => {
+                  setEditingDebtPlan(plan);
+                  setIsDebtPlanModalVisible(true);
+                }}
+                activeOpacity={0.7}
+              >
+                <View style={{ flex: 1 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Text style={[styles.debtTitle, { color: theme.text }]}>{plan.title}</Text>
+                    <Text style={{ fontSize: 11, color: Colors.danger, fontWeight: '700' }}>
+                      • {isDirect ? (plan.paymentMode === 'single' ? 'À vista' : 'Split') : 'Com Etapas'}
+                    </Text>
+                  </View>
+
+                  <View style={{ flexDirection: 'row', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+                    <Text style={{ fontSize: 12, color: theme.textSecondary }}>
+                      Total: <Text style={{ color: Colors.danger, fontWeight: '700' }}>{formatCurrencyBRL(totalAmount)}</Text>
+                    </Text>
+                    <Text style={{ fontSize: 12, color: theme.textSecondary }}>
+                      • Restante: <Text style={{ color: theme.text, fontWeight: '700' }}>{formatCurrencyBRL(remaining)}</Text>
+                    </Text>
+                    {totalInstallmentsCount > 0 && (
+                      <Text style={{ fontSize: 12, color: theme.textSecondary }}>
+                        • {totalInstallmentsCount} parcela(s)
+                      </Text>
+                    )}
+                  </View>
+
+                  <View style={{ flexDirection: 'row', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+                    {bankName && (
+                      <Text style={{ fontSize: 11, color: theme.textSecondary }}>• {bankName}</Text>
+                    )}
+                    {plan.paymentMethod && (
+                      <Text style={{ fontSize: 11, color: theme.textSecondary, textTransform: 'capitalize' }}>
+                        • {plan.paymentMethod}
+                      </Text>
+                    )}
+                    {plan.deadlineDate && (
+                      <Text style={{ fontSize: 11, color: theme.textSecondary }}>
+                        • Até {formatDateBR(plan.deadlineDate)}
+                      </Text>
+                    )}
+                  </View>
+                </View>
+
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setEditingDebtPlan(plan);
+                      setIsDebtPlanModalVisible(true);
+                    }}
+                    style={{ padding: 6 }}
+                  >
+                    <Ionicons name="pencil" size={16} color={theme.textSecondary} />
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => {
+                      Alert.alert(
+                        'Excluir Dívida Planejada',
+                        `Deseja excluir "${plan.title}" dos seus planejamentos?`,
+                        [
+                          { text: 'Cancelar', style: 'cancel' },
+                          {
+                            text: 'Excluir',
+                            style: 'destructive',
+                            onPress: () => deletePlanning(plan.id),
+                          },
+                        ]
+                      );
+                    }}
+                    style={{ padding: 6 }}
+                  >
+                    <Ionicons name="trash-outline" size={16} color={Colors.danger} />
+                  </TouchableOpacity>
+                </View>
+              </TouchableOpacity>
+            );
+          })}
+
+        {plannings.filter((p) => p.category === 'Dívidas').length === 0 && (
+          <Text style={[styles.emptyHint, { color: theme.textSecondary, marginTop: 8 }]}>
+            Nenhuma dívida planejada ainda. Clique em "Planejar Dívida" para configurar prazos, splits e amortização completa.
+          </Text>
         )}
       </View>
 
@@ -452,6 +538,14 @@ export default function ProfileScreen() {
           <Text style={styles.resetButtonText}>Resetar Todos os Dados</Text>
         </TouchableOpacity>
       </View>
+
+      <PlanningModal
+        visible={isDebtPlanModalVisible}
+        onClose={() => setIsDebtPlanModalVisible(false)}
+        planningToEdit={editingDebtPlan}
+        defaultCategory="Dívidas"
+        defaultColor="#EF4444"
+      />
     </ScrollView>
   );
 }
@@ -611,16 +705,46 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '500',
   },
-  debtRow: {
+  cardHeaderBetween: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 8,
-    borderBottomWidth: 0.5,
+    gap: 8,
+    marginBottom: 14,
+  },
+  cardTitleWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  addDebtBtnHeader: {
+    backgroundColor: Colors.danger,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    flexShrink: 0,
+  },
+  addDebtBtnHeaderText: {
+    color: '#FFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  debtCardItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginBottom: 8,
   },
   debtTitle: {
     fontSize: 14,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   debtValue: {
     fontSize: 13,

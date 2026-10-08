@@ -26,14 +26,16 @@ interface FinanceState {
   addBank: (bank: Omit<BankAccount, 'id'>) => Promise<void>;
   removeBank: (id: string) => Promise<void>;
   addDebt: (debt: Omit<Debt, 'id'>) => Promise<void>;
+  updateDebt: (id: string, debt: Partial<Debt>) => Promise<void>;
   removeDebt: (id: string) => Promise<void>;
   setIncomeDates: (dates: IncomeDate[]) => Promise<void>;
   completeOnboarding: (data: Partial<FinancialProfile>) => Promise<void>;
 
-  // Planejamentos
-  addPlanning: (plan: Omit<Planning, 'id' | 'createdAt' | 'steps'>) => Promise<string>;
+  // Planejamentos (Direto ou com Etapas)
+  addPlanning: (plan: Omit<Planning, 'id' | 'createdAt' | 'steps' | 'directInstallments'> & { steps?: Step[]; directInstallments?: any[] }) => Promise<string>;
   updatePlanning: (id: string, plan: Partial<Planning>) => Promise<void>;
   deletePlanning: (id: string) => Promise<void>;
+  toggleDirectInstallmentPaid: (planId: string, installmentId: string) => Promise<void>;
 
   // Etapas
   addStep: (
@@ -146,6 +148,16 @@ export const useFinanceStore = create<FinanceState>((set, get) => ({
     await get().save();
   },
 
+  updateDebt: async (id, debtData) => {
+    set((state) => ({
+      profile: {
+        ...state.profile,
+        debts: state.profile.debts.map((d) => (d.id === id ? { ...d, ...debtData } : d)),
+      },
+    }));
+    await get().save();
+  },
+
   removeDebt: async (id) => {
     set((state) => ({
       profile: {
@@ -167,27 +179,91 @@ export const useFinanceStore = create<FinanceState>((set, get) => ({
   },
 
   completeOnboarding: async (data) => {
-    set((state) => ({
+    const state = get();
+    const futureDate = new Date();
+    futureDate.setMonth(futureDate.getMonth() + 6);
+    const deadlineStr = futureDate.toISOString().split('T')[0];
+
+    const generatedDebtPlans: Planning[] = (data.debts || []).map((debt) => {
+      const planId = `plan_debt_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
+      const effectiveSplits = data.incomeDates || state.profile.incomeDates;
+      const directInstallments = generateSplitInstallments({
+        stepId: planId,
+        totalAmount: debt.totalAmount || 0,
+        paymentMode: 'split',
+        deadlineDate: deadlineStr,
+        incomeDates: effectiveSplits,
+      });
+
+      return {
+        id: planId,
+        title: debt.title,
+        description: debt.creditor ? `Credor: ${debt.creditor}` : 'Dívida cadastrada no setup inicial',
+        category: 'Dívidas',
+        color: '#EF4444',
+        type: 'direct',
+        totalAmount: debt.totalAmount,
+        paymentMode: 'split',
+        paymentMethod: 'boleto',
+        deadlineDate: deadlineStr,
+        directInstallments,
+        steps: [],
+        createdAt: new Date().toISOString(),
+      };
+    });
+
+    set((s) => ({
       profile: {
-        ...state.profile,
+        ...s.profile,
         ...data,
         onboardingCompleted: true,
       },
+      plannings: [...generatedDebtPlans, ...s.plannings],
     }));
     await get().save();
   },
 
   addPlanning: async (planData) => {
     const newPlanId = `plan_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
+    const state = get();
+
+    let directInstallments: any[] = [];
+    if (planData.type === 'direct' && (planData.totalAmount || 0) > 0) {
+      const effectiveSplits = planData.customSplit?.length
+        ? planData.customSplit
+        : state.profile.incomeDates;
+
+      directInstallments = generateSplitInstallments({
+        stepId: newPlanId,
+        totalAmount: planData.totalAmount || 0,
+        paymentMode: planData.paymentMode || 'split',
+        singleDueDate: planData.singleDueDate,
+        deadlineDate: planData.deadlineDate || new Date().toISOString().split('T')[0],
+        incomeDates: effectiveSplits,
+      });
+
+      if (directInstallments.length > 0) {
+        const firstDue = directInstallments[0];
+        scheduleStepReminders(
+          planData.title,
+          firstDue.dueDate,
+          firstDue.amount,
+          planData.recipientName || ''
+        ).catch(() => {});
+      }
+    }
+
     const newPlan: Planning = {
       ...planData,
       id: newPlanId,
+      type: planData.type || 'direct',
+      steps: planData.steps || [],
+      directInstallments,
       createdAt: new Date().toISOString(),
-      steps: [],
     };
 
-    set((state) => ({
-      plannings: [newPlan, ...state.plannings],
+    set((s) => ({
+      plannings: [newPlan, ...s.plannings],
     }));
 
     await get().save();
@@ -195,20 +271,58 @@ export const useFinanceStore = create<FinanceState>((set, get) => ({
   },
 
   updatePlanning: async (id, planData) => {
-    set((state) => ({
-      plannings: state.plannings.map((p) =>
-        p.id === id ? { ...p, ...planData } : p
+    const state = get();
+    const existingPlan = state.plannings.find((p) => p.id === id);
+    if (!existingPlan) return;
+
+    let updatedDirectInstallments = existingPlan.directInstallments || [];
+
+    if (existingPlan.type === 'direct' || planData.type === 'direct') {
+      const targetAmount = planData.totalAmount ?? existingPlan.totalAmount ?? 0;
+      const targetDeadline = planData.deadlineDate ?? existingPlan.deadlineDate ?? '';
+      const targetMode = planData.paymentMode ?? existingPlan.paymentMode ?? 'split';
+      const targetSingleDueDate = planData.singleDueDate ?? existingPlan.singleDueDate;
+      const effectiveSplits =
+        planData.customSplit?.length
+          ? planData.customSplit
+          : existingPlan.customSplit?.length
+          ? existingPlan.customSplit
+          : state.profile.incomeDates;
+
+      if (targetAmount > 0) {
+        updatedDirectInstallments = generateSplitInstallments({
+          stepId: id,
+          totalAmount: targetAmount,
+          paymentMode: targetMode,
+          singleDueDate: targetSingleDueDate,
+          deadlineDate: targetDeadline,
+          incomeDates: effectiveSplits,
+        });
+      }
+    }
+
+    set((s) => ({
+      plannings: s.plannings.map((p) =>
+        p.id === id ? { ...p, ...planData, directInstallments: updatedDirectInstallments } : p
       ),
     }));
     await get().save();
   },
 
   deletePlanning: async (id) => {
-    // Cancela possíveis notificações das etapas deste planejamento
     const plan = get().plannings.find((p) => p.id === id);
     if (plan) {
-      for (const step of plan.steps) {
-        for (const inst of step.installments) {
+      if (plan.steps) {
+        for (const step of plan.steps) {
+          for (const inst of step.installments) {
+            if (inst.notificationId) {
+              cancelNotification(inst.notificationId);
+            }
+          }
+        }
+      }
+      if (plan.directInstallments) {
+        for (const inst of plan.directInstallments) {
           if (inst.notificationId) {
             cancelNotification(inst.notificationId);
           }
@@ -222,6 +336,27 @@ export const useFinanceStore = create<FinanceState>((set, get) => ({
     await get().save();
   },
 
+  toggleDirectInstallmentPaid: async (planId, installmentId) => {
+    set((state) => ({
+      plannings: state.plannings.map((p) => {
+        if (p.id !== planId) return p;
+        return {
+          ...p,
+          directInstallments: (p.directInstallments || []).map((inst) => {
+            if (inst.id !== installmentId) return inst;
+            const nextPaid = !inst.isPaid;
+            return {
+              ...inst,
+              isPaid: nextPaid,
+              paidAt: nextPaid ? new Date().toISOString() : undefined,
+            };
+          }),
+        };
+      }),
+    }));
+    await get().save();
+  },
+
   addStep: async (planId, stepData) => {
     const newStepId = `step_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
     const state = get();
@@ -229,15 +364,16 @@ export const useFinanceStore = create<FinanceState>((set, get) => ({
       ? stepData.customSplit
       : state.profile.incomeDates;
 
-    // Gera parcelas determinísticas
+    // Gera parcelas determinísticas considerando modo de pagamento (à vista ou split)
     const installments = generateSplitInstallments({
       stepId: newStepId,
       totalAmount: stepData.totalAmount,
+      paymentMode: stepData.paymentMode || 'split',
+      singleDueDate: stepData.singleDueDate,
       deadlineDate: stepData.deadlineDate,
       incomeDates: effectiveSplits,
     });
 
-    // Agenda notificações locais para a primeira parcela
     if (installments.length > 0) {
       const firstDue = installments[0];
       scheduleStepReminders(
@@ -258,7 +394,7 @@ export const useFinanceStore = create<FinanceState>((set, get) => ({
 
     set((s) => ({
       plannings: s.plannings.map((p) =>
-        p.id === planId ? { ...p, steps: [...p.steps, newStep] } : p
+        p.id === planId ? { ...p, steps: [...(p.steps || []), newStep] } : p
       ),
     }));
 
@@ -268,19 +404,22 @@ export const useFinanceStore = create<FinanceState>((set, get) => ({
   updateStep: async (planId, stepId, stepData) => {
     const state = get();
     const plan = state.plannings.find((p) => p.id === planId);
-    const existingStep = plan?.steps.find((s) => s.id === stepId);
+    const existingStep = plan?.steps?.find((s) => s.id === stepId);
     if (!existingStep) return;
 
     let updatedInstallments = existingStep.installments;
 
-    // Se o valor total ou a data limite mudou, recalcula parcelas mantendo as que já foram pagas
     if (
-      (stepData.totalAmount !== undefined && stepData.totalAmount !== existingStep.totalAmount) ||
-      (stepData.deadlineDate !== undefined && stepData.deadlineDate !== existingStep.deadlineDate) ||
+      stepData.totalAmount !== undefined ||
+      stepData.deadlineDate !== undefined ||
+      stepData.paymentMode !== undefined ||
+      stepData.singleDueDate !== undefined ||
       stepData.customSplit !== undefined
     ) {
       const targetAmount = stepData.totalAmount ?? existingStep.totalAmount;
       const targetDeadline = stepData.deadlineDate ?? existingStep.deadlineDate;
+      const targetMode = stepData.paymentMode ?? existingStep.paymentMode ?? 'split';
+      const targetSingleDate = stepData.singleDueDate ?? existingStep.singleDueDate;
       const effectiveSplits =
         stepData.customSplit?.length
           ? stepData.customSplit
@@ -291,6 +430,8 @@ export const useFinanceStore = create<FinanceState>((set, get) => ({
       updatedInstallments = generateSplitInstallments({
         stepId,
         totalAmount: targetAmount,
+        paymentMode: targetMode,
+        singleDueDate: targetSingleDate,
         deadlineDate: targetDeadline,
         incomeDates: effectiveSplits,
       });
@@ -301,7 +442,7 @@ export const useFinanceStore = create<FinanceState>((set, get) => ({
         if (p.id !== planId) return p;
         return {
           ...p,
-          steps: p.steps.map((st) =>
+          steps: (p.steps || []).map((st) =>
             st.id === stepId
               ? { ...st, ...stepData, installments: updatedInstallments }
               : st
@@ -319,7 +460,7 @@ export const useFinanceStore = create<FinanceState>((set, get) => ({
         if (p.id !== planId) return p;
         return {
           ...p,
-          steps: p.steps.filter((s) => s.id !== stepId),
+          steps: (p.steps || []).filter((s) => s.id !== stepId),
         };
       }),
     }));
@@ -332,7 +473,7 @@ export const useFinanceStore = create<FinanceState>((set, get) => ({
         if (p.id !== planId) return p;
         return {
           ...p,
-          steps: p.steps.map((st) => {
+          steps: (p.steps || []).map((st) => {
             if (st.id !== stepId) return st;
             return {
               ...st,

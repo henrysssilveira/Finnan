@@ -115,6 +115,7 @@ export function OnboardingModal({ visible }: { visible: boolean }) {
         title: newDebtTitle.trim(),
         totalAmount: amount,
         remainingAmount: amount,
+        isIncludedInMonthlyPlanning: true,
       },
     ]);
     setNewDebtTitle('');

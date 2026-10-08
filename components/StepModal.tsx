@@ -13,7 +13,7 @@ import {
   Switch,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Step, RecurrenceType } from '@/types/finance';
+import { Step, RecurrenceType, PaymentMethod, PaymentMode, IncomeDate } from '@/types/finance';
 import { useFinanceStore } from '@/stores/financeStore';
 import Colors from '@/constants/Colors';
 import { useColorScheme } from '@/components/useColorScheme';
@@ -23,6 +23,7 @@ import {
   formatDateBR,
   formatDateISO,
 } from '@/services/splitCalculator';
+import { DatePickerButton } from '@/components/DatePickerButton';
 
 interface StepModalProps {
   visible: boolean;
@@ -39,6 +40,15 @@ const PIX_TYPES = [
   { label: 'Aleatória', value: 'aleatoria' },
 ] as const;
 
+const PAYMENT_METHODS: { label: string; value: PaymentMethod; icon: string }[] = [
+  { label: 'PIX', value: 'pix', icon: 'flash-outline' },
+  { label: 'Crédito', value: 'credito', icon: 'card' },
+  { label: 'Débito', value: 'debito', icon: 'card-outline' },
+  { label: 'Boleto', value: 'boleto', icon: 'barcode-outline' },
+  { label: 'Dinheiro', value: 'dinheiro', icon: 'cash-outline' },
+  { label: 'Outro', value: 'outro', icon: 'ellipsis-horizontal' },
+];
+
 export function StepModal({ visible, onClose, planId, stepToEdit }: StepModalProps) {
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme];
@@ -50,11 +60,14 @@ export function StepModal({ visible, onClose, planId, stepToEdit }: StepModalPro
   const [recipientName, setRecipientName] = useState('');
   const [pixKey, setPixKey] = useState('');
   const [pixKeyType, setPixKeyType] = useState<'cpf' | 'cnpj' | 'email' | 'telefone' | 'aleatoria'>('cpf');
+  const [bankAccountId, setBankAccountId] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('pix');
+  const [paymentMode, setPaymentMode] = useState<PaymentMode>('split');
+  const [singleDueDate, setSingleDueDate] = useState('');
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurrenceInterval, setRecurrenceInterval] = useState<RecurrenceType>('monthly');
-
-  // Data Limite
-  const [deadlineStr, setDeadlineStr] = useState(''); // YYYY-MM-DD
+  const [deadlineStr, setDeadlineStr] = useState('');
+  const [customSplits, setCustomSplits] = useState<IncomeDate[]>([]);
 
   useEffect(() => {
     if (stepToEdit) {
@@ -64,36 +77,53 @@ export function StepModal({ visible, onClose, planId, stepToEdit }: StepModalPro
       setRecipientName(stepToEdit.recipientName);
       setPixKey(stepToEdit.pixKey);
       setPixKeyType(stepToEdit.pixKeyType);
+      setBankAccountId(stepToEdit.bankAccountId || (profile.banks[0]?.id || ''));
+      setPaymentMethod(stepToEdit.paymentMethod || 'pix');
+      setPaymentMode(stepToEdit.paymentMode || 'split');
+      setSingleDueDate(stepToEdit.singleDueDate || formatDateISO(new Date()));
       setIsRecurring(stepToEdit.isRecurring);
       setRecurrenceInterval(stepToEdit.recurrenceInterval || 'monthly');
       setDeadlineStr(stepToEdit.deadlineDate);
+      setCustomSplits(stepToEdit.customSplit?.length ? stepToEdit.customSplit : profile.incomeDates);
     } else {
-      // Padrão: 2 meses à frente
       const defaultDate = new Date();
       defaultDate.setMonth(defaultDate.getMonth() + 2);
+
       setTitle('');
       setDescription('');
       setTotalAmountStr('');
       setRecipientName('');
       setPixKey('');
       setPixKeyType('cpf');
+      setBankAccountId(profile.banks[0]?.id || '');
+      setPaymentMethod('pix');
+      setPaymentMode('split');
+      setSingleDueDate(formatDateISO(new Date()));
       setIsRecurring(false);
       setRecurrenceInterval('monthly');
       setDeadlineStr(formatDateISO(defaultDate));
+      setCustomSplits(profile.incomeDates.length > 0 ? profile.incomeDates : [{ day: 15, percentage: 100 }]);
     }
-  }, [stepToEdit, visible]);
+  }, [stepToEdit, visible, profile.banks, profile.incomeDates]);
 
   const parsedTotal = parseFloat(totalAmountStr.replace(',', '.')) || 0;
 
-  // Pré-visualização determinística das parcelas geradas
-  const previewInstallments = parsedTotal > 0 && deadlineStr
+  const previewInstallments = parsedTotal > 0
     ? generateSplitInstallments({
-        stepId: 'preview',
+        stepId: 'preview_step',
         totalAmount: parsedTotal,
+        paymentMode,
+        singleDueDate,
         deadlineDate: deadlineStr,
-        incomeDates: profile.incomeDates,
+        incomeDates: customSplits,
       })
     : [];
+
+  const handleUpdateSplitPercent = (index: number, percentVal: number) => {
+    const updated = [...customSplits];
+    updated[index] = { ...updated[index], percentage: percentVal };
+    setCustomSplits(updated);
+  };
 
   const handleSave = async () => {
     if (!title.trim()) {
@@ -104,36 +134,39 @@ export function StepModal({ visible, onClose, planId, stepToEdit }: StepModalPro
       Alert.alert('Valor Inválido', 'Informe um valor total maior que zero.');
       return;
     }
-    if (!deadlineStr || !deadlineStr.includes('-')) {
-      Alert.alert('Data Inválida', 'Informe uma data limite válida (formato YYYY-MM-DD).');
-      return;
+
+    if (paymentMode === 'split') {
+      const totalSplitPercent = customSplits.reduce((acc, c) => acc + c.percentage, 0);
+      if (totalSplitPercent !== 100) {
+        Alert.alert(
+          'Divisão de Split',
+          `A soma das porcentagens do split deve ser 100% (atualmente está em ${totalSplitPercent}%).`
+        );
+        return;
+      }
     }
 
+    const payload: Partial<Step> = {
+      title: title.trim(),
+      description: description.trim(),
+      totalAmount: parsedTotal,
+      recipientName: recipientName.trim(),
+      pixKey: pixKey.trim(),
+      pixKeyType,
+      bankAccountId,
+      paymentMethod,
+      paymentMode,
+      singleDueDate,
+      isRecurring,
+      recurrenceInterval: isRecurring ? recurrenceInterval : 'none',
+      deadlineDate: deadlineStr,
+      customSplit: customSplits,
+    };
+
     if (stepToEdit) {
-      await updateStep(planId, stepToEdit.id, {
-        title: title.trim(),
-        description: description.trim(),
-        totalAmount: parsedTotal,
-        recipientName: recipientName.trim(),
-        pixKey: pixKey.trim(),
-        pixKeyType,
-        isRecurring,
-        recurrenceInterval: isRecurring ? recurrenceInterval : 'none',
-        deadlineDate: deadlineStr,
-      });
+      await updateStep(planId, stepToEdit.id, payload);
     } else {
-      await addStep(planId, {
-        title: title.trim(),
-        description: description.trim(),
-        totalAmount: parsedTotal,
-        recipientName: recipientName.trim(),
-        pixKey: pixKey.trim(),
-        pixKeyType,
-        isRecurring,
-        recurrenceInterval: isRecurring ? recurrenceInterval : 'none',
-        deadlineDate: deadlineStr,
-        customSplit: profile.incomeDates,
-      });
+      await addStep(planId, payload as any);
     }
 
     onClose();
@@ -153,7 +186,7 @@ export function StepModal({ visible, onClose, planId, stepToEdit }: StepModalPro
                 {stepToEdit ? 'Editar Etapa / Meta' : 'Nova Etapa / Meta'}
               </Text>
               <Text style={[styles.subtitle, { color: theme.textSecondary }]}>
-                Planejamento e divisão determinística de pagamentos
+                Planejamento e divisão de pagamentos
               </Text>
             </View>
             <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
@@ -166,20 +199,20 @@ export function StepModal({ visible, onClose, planId, stepToEdit }: StepModalPro
             <Text style={[styles.label, { color: theme.text }]}>Título da Etapa *</Text>
             <TextInput
               style={[styles.input, { backgroundColor: theme.inputBg, color: theme.text, borderColor: theme.border }]}
-              placeholder="Ex: Pagamento Pedreiro, Compra de Materiais"
+              placeholder="Ex: Compra de Material, Mão de Obra"
               placeholderTextColor={theme.textSecondary}
               value={title}
               onChangeText={setTitle}
             />
 
-            <Text style={[styles.label, { color: theme.text }]}>Descrição Detalhada</Text>
+            <Text style={[styles.label, { color: theme.text }]}>Descrição</Text>
             <TextInput
               style={[
                 styles.input,
                 styles.textArea,
                 { backgroundColor: theme.inputBg, color: theme.text, borderColor: theme.border },
               ]}
-              placeholder="Descreva itens, notas ou referências..."
+              placeholder="Notas ou referências adicionais..."
               placeholderTextColor={theme.textSecondary}
               multiline
               numberOfLines={2}
@@ -187,51 +220,199 @@ export function StepModal({ visible, onClose, planId, stepToEdit }: StepModalPro
               onChangeText={setDescription}
             />
 
-            {/* Valor Total e Data Limite */}
-            <View style={styles.twoCols}>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.label, { color: theme.text }]}>Valor Total (R$) *</Text>
-                <TextInput
-                  style={[styles.input, { backgroundColor: theme.inputBg, color: theme.text, borderColor: theme.border }]}
-                  placeholder="0.00"
-                  placeholderTextColor={theme.textSecondary}
-                  keyboardType="decimal-pad"
-                  value={totalAmountStr}
-                  onChangeText={setTotalAmountStr}
-                />
-              </View>
+            {/* Valor Total */}
+            <Text style={[styles.label, { color: theme.text }]}>Valor Total (R$) *</Text>
+            <TextInput
+              style={[styles.input, { backgroundColor: theme.inputBg, color: theme.text, borderColor: theme.border }]}
+              placeholder="0.00"
+              placeholderTextColor={theme.textSecondary}
+              keyboardType="decimal-pad"
+              value={totalAmountStr}
+              onChangeText={setTotalAmountStr}
+            />
 
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.label, { color: theme.text }]}>Data Limite *</Text>
-                <TextInput
-                  style={[styles.input, { backgroundColor: theme.inputBg, color: theme.text, borderColor: theme.border }]}
-                  placeholder="AAAA-MM-DD"
-                  placeholderTextColor={theme.textSecondary}
-                  value={deadlineStr}
-                  onChangeText={setDeadlineStr}
-                />
-              </View>
+            {/* Conta Bancária Pagadora */}
+            {profile.banks.length > 0 && (
+              <>
+                <Text style={[styles.label, { color: theme.text }]}>Pagar com qual Conta / Banco?</Text>
+                <View style={styles.chipsRow}>
+                  {profile.banks.map((b) => {
+                    const isSelected = bankAccountId === b.id;
+                    return (
+                      <TouchableOpacity
+                        key={b.id}
+                        style={[
+                          styles.chip,
+                          {
+                            backgroundColor: isSelected ? Colors.primary : theme.inputBg,
+                            borderColor: isSelected ? Colors.primary : theme.border,
+                          },
+                        ]}
+                        onPress={() => setBankAccountId(b.id)}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            { color: isSelected ? '#FFF' : theme.text, fontWeight: isSelected ? '700' : '500' },
+                          ]}
+                        >
+                          {b.name}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </>
+            )}
+
+            {/* Forma de Pagamento */}
+            <Text style={[styles.label, { color: theme.text }]}>Forma de Pagamento</Text>
+            <View style={styles.chipsRow}>
+              {PAYMENT_METHODS.map((pm) => {
+                const isSelected = paymentMethod === pm.value;
+                return (
+                  <TouchableOpacity
+                    key={pm.value}
+                    style={[
+                      styles.chip,
+                      {
+                        backgroundColor: isSelected ? Colors.primary : theme.inputBg,
+                        borderColor: isSelected ? Colors.primary : theme.border,
+                      },
+                    ]}
+                    onPress={() => setPaymentMethod(pm.value)}
+                  >
+                    <Ionicons
+                      name={pm.icon as any}
+                      size={14}
+                      color={isSelected ? '#FFF' : theme.textSecondary}
+                      style={{ marginRight: 4 }}
+                    />
+                    <Text
+                      style={[
+                        styles.chipText,
+                        { color: isSelected ? '#FFF' : theme.text, fontWeight: isSelected ? '700' : '500' },
+                      ]}
+                    >
+                      {pm.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
             </View>
 
-            {/* Favorecido e Chave PIX */}
+            {/* Como será pago: À Vista vs Split */}
+            <Text style={[styles.label, { color: theme.text }]}>Como será pago?</Text>
+            <View style={styles.typeSelectorRow}>
+              <TouchableOpacity
+                style={[
+                  styles.typeSelectorBtn,
+                  {
+                    backgroundColor: paymentMode === 'single' ? Colors.primary : theme.inputBg,
+                    borderColor: paymentMode === 'single' ? Colors.primary : theme.border,
+                  },
+                ]}
+                onPress={() => setPaymentMode('single')}
+              >
+                <Ionicons
+                  name="cash-outline"
+                  size={16}
+                  color={paymentMode === 'single' ? '#FFF' : theme.text}
+                />
+                <Text
+                  style={[
+                    styles.typeSelectorText,
+                    { color: paymentMode === 'single' ? '#FFF' : theme.text },
+                  ]}
+                >
+                  À Vista / Único
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.typeSelectorBtn,
+                  {
+                    backgroundColor: paymentMode === 'split' ? Colors.primary : theme.inputBg,
+                    borderColor: paymentMode === 'split' ? Colors.primary : theme.border,
+                  },
+                ]}
+                onPress={() => setPaymentMode('split')}
+              >
+                <Ionicons
+                  name="cut-outline"
+                  size={16}
+                  color={paymentMode === 'split' ? '#FFF' : theme.text}
+                />
+                <Text
+                  style={[
+                    styles.typeSelectorText,
+                    { color: paymentMode === 'split' ? '#FFF' : theme.text },
+                  ]}
+                >
+                  Dividido / Split
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Datas */}
+            {paymentMode === 'single' ? (
+              <View>
+                <Text style={[styles.label, { color: theme.text }]}>Data de Vencimento</Text>
+                <DatePickerButton
+                  value={singleDueDate}
+                  onChange={setSingleDueDate}
+                />
+              </View>
+            ) : (
+              <View>
+                <Text style={[styles.label, { color: theme.text }]}>Data Limite Final</Text>
+                <DatePickerButton
+                  value={deadlineStr}
+                  onChange={setDeadlineStr}
+                />
+
+                {/* Porcentagens customizáveis de split */}
+                <Text style={[styles.label, { color: theme.text, marginTop: 12 }]}>
+                  Configurar Porcentagem (%) por Data de Recebimento
+                </Text>
+                {customSplits.map((item, idx) => (
+                  <View key={idx} style={[styles.splitConfigRow, { borderColor: theme.border }]}>
+                    <Text style={[styles.splitConfigLabel, { color: theme.text }]}>
+                      Recebimento dia {item.day}:
+                    </Text>
+                    <TextInput
+                      style={[styles.splitConfigInput, { backgroundColor: theme.inputBg, color: theme.text, borderColor: theme.border }]}
+                      keyboardType="number-pad"
+                      maxLength={3}
+                      value={String(item.percentage)}
+                      onChangeText={(v) => handleUpdateSplitPercent(idx, parseInt(v) || 0)}
+                    />
+                    <Text style={{ color: theme.textSecondary }}>%</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {/* Favorecido e PIX */}
             <Text style={[styles.label, { color: theme.text }]}>Favorecido (Nome de quem vai receber)</Text>
             <TextInput
               style={[styles.input, { backgroundColor: theme.inputBg, color: theme.text, borderColor: theme.border }]}
-              placeholder="Ex: João da Silva / Loja de Tintas"
+              placeholder="Ex: Carlos Mecânico"
               placeholderTextColor={theme.textSecondary}
               value={recipientName}
               onChangeText={setRecipientName}
             />
 
             <Text style={[styles.label, { color: theme.text }]}>Tipo de Chave PIX</Text>
-            <View style={styles.pixTypeRow}>
+            <View style={styles.chipsRow}>
               {PIX_TYPES.map((pt) => {
                 const isSelected = pixKeyType === pt.value;
                 return (
                   <TouchableOpacity
                     key={pt.value}
                     style={[
-                      styles.pixTypeChip,
+                      styles.chip,
                       {
                         backgroundColor: isSelected ? Colors.primary : theme.inputBg,
                         borderColor: isSelected ? Colors.primary : theme.border,
@@ -241,7 +422,7 @@ export function StepModal({ visible, onClose, planId, stepToEdit }: StepModalPro
                   >
                     <Text
                       style={[
-                        styles.pixTypeText,
+                        styles.chipText,
                         { color: isSelected ? '#FFF' : theme.text, fontWeight: isSelected ? '700' : '500' },
                       ]}
                     >
@@ -266,7 +447,7 @@ export function StepModal({ visible, onClose, planId, stepToEdit }: StepModalPro
               <View>
                 <Text style={[styles.switchTitle, { color: theme.text }]}>Pagamento Recorrente?</Text>
                 <Text style={[styles.switchSubtitle, { color: theme.textSecondary }]}>
-                  Se for uma despesa contínua (ex: mensalidade)
+                  Se for despesa contínua mensal
                 </Text>
               </View>
               <Switch
@@ -276,35 +457,18 @@ export function StepModal({ visible, onClose, planId, stepToEdit }: StepModalPro
               />
             </View>
 
-            {/* Split e Projeção Determinística de Parcelas */}
+            {/* Split Projeção */}
             {previewInstallments.length > 0 && (
               <View style={[styles.previewSection, { backgroundColor: theme.inputBg, borderColor: theme.border }]}>
-                <View style={styles.previewHeader}>
-                  <Ionicons name="calculator-outline" size={18} color={Colors.primary} />
-                  <Text style={[styles.previewTitle, { color: theme.text }]}>
-                    Split Sequencial Calculado ({previewInstallments.length} parcelas)
-                  </Text>
-                </View>
-                <Text style={[styles.previewDesc, { color: theme.textSecondary }]}>
-                  Distribuído automaticamente conforme os dias de recebimento do seu perfil:
+                <Text style={[styles.previewTitle, { color: theme.text }]}>
+                  Parcelas Calculadas ({previewInstallments.length}):
                 </Text>
-
                 {previewInstallments.map((inst, idx) => (
-                  <View key={idx} style={[styles.installmentRow, { borderColor: theme.border }]}>
-                    <View style={styles.installmentLeft}>
-                      <View style={[styles.badgeNumber, { backgroundColor: '#10B98125' }]}>
-                        <Text style={styles.badgeNumberText}>#{idx + 1}</Text>
-                      </View>
-                      <View style={{ marginLeft: 8 }}>
-                        <Text style={[styles.instDate, { color: theme.text }]}>
-                          Vence: {formatDateBR(inst.dueDate)}
-                        </Text>
-                        <Text style={[styles.instSub, { color: theme.textSecondary }]}>
-                          Recebimento dia {inst.incomeDay}
-                        </Text>
-                      </View>
-                    </View>
-                    <Text style={[styles.instAmount, { color: Colors.primary }]}>
+                  <View key={idx} style={styles.previewRow}>
+                    <Text style={[styles.previewDate, { color: theme.text }]}>
+                      {formatDateBR(inst.dueDate)} (dia {inst.incomeDay})
+                    </Text>
+                    <Text style={[styles.previewAmount, { color: Colors.primary }]}>
                       {formatCurrencyBRL(inst.amount)}
                     </Text>
                   </View>
@@ -347,7 +511,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   title: {
-    fontSize: 20,
+    fontSize: 19,
     fontWeight: '700',
   },
   subtitle: {
@@ -374,27 +538,68 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
   textArea: {
-    height: 64,
-    paddingTop: 10,
+    height: 56,
+    paddingTop: 8,
     textAlignVertical: 'top',
   },
-  twoCols: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  pixTypeRow: {
+  chipsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 6,
+    marginBottom: 4,
   },
-  pixTypeChip: {
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingVertical: 6,
     paddingHorizontal: 10,
     borderRadius: 8,
     borderWidth: 1,
   },
-  pixTypeText: {
+  chipText: {
     fontSize: 12,
+  },
+  typeSelectorRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 6,
+  },
+  typeSelectorBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  typeSelectorText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  splitConfigRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 8,
+    marginBottom: 6,
+  },
+  splitConfigLabel: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  splitConfigInput: {
+    width: 60,
+    height: 36,
+    borderRadius: 8,
+    borderWidth: 1,
+    textAlign: 'center',
+    fontSize: 14,
+    fontWeight: '700',
   },
   switchRow: {
     flexDirection: 'row',
@@ -403,7 +608,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderTopWidth: 1,
     borderBottomWidth: 1,
-    marginVertical: 14,
+    marginVertical: 12,
   },
   switchTitle: {
     fontSize: 14,
@@ -414,58 +619,26 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   previewSection: {
-    borderRadius: 14,
+    borderRadius: 12,
     borderWidth: 1,
-    padding: 14,
+    padding: 12,
     marginTop: 12,
-    marginBottom: 8,
-  },
-  previewHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
   },
   previewTitle: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '700',
+    marginBottom: 6,
   },
-  previewDesc: {
-    fontSize: 12,
-    marginTop: 4,
-    marginBottom: 10,
-  },
-  installmentRow: {
+  previewRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 8,
-    borderBottomWidth: 0.5,
+    paddingVertical: 4,
   },
-  installmentLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  badgeNumber: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  badgeNumberText: {
-    color: Colors.primary,
-    fontWeight: '700',
+  previewDate: {
     fontSize: 12,
   },
-  instDate: {
+  previewAmount: {
     fontSize: 13,
-    fontWeight: '600',
-  },
-  instSub: {
-    fontSize: 11,
-  },
-  instAmount: {
-    fontSize: 14,
     fontWeight: '700',
   },
   saveBtn: {
@@ -475,11 +648,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    marginTop: 20,
+    marginTop: 16,
   },
   saveBtnText: {
     color: '#FFF',
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '600',
   },
 });

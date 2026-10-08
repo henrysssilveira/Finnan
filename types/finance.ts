@@ -9,12 +9,29 @@ export interface BankAccount {
   type: 'corrente' | 'poupanca' | 'investimento' | 'carteira';
 }
 
+export type PaymentMethod =
+  | 'pix'
+  | 'credito'
+  | 'debito'
+  | 'boleto'
+  | 'dinheiro'
+  | 'transferencia'
+  | 'outro';
+
+export type PaymentMode = 'single' | 'split'; // 'single' = à vista/único, 'split' = dividido por ciclo
+
 export interface Debt {
   id: string;
   title: string;
+  creditor?: string;
   totalAmount: number;
   remainingAmount: number;
-  dueDate?: string;
+  installmentsCount?: number; // Ex: 12x
+  monthlyPayment?: number; // Parcela mensal
+  dueDate?: string; // Dia do vencimento
+  bankAccountId?: string; // Conta usada para pagar
+  paymentMethod?: PaymentMethod;
+  isIncludedInMonthlyPlanning?: boolean; // Entra no cálculo de comprometido
 }
 
 export interface FinancialProfile {
@@ -27,7 +44,7 @@ export interface FinancialProfile {
 
 export interface SplitInstallment {
   id: string;
-  stepId: string;
+  stepId: string; // id da etapa ou id do planejamento direto
   dueDate: string; // YYYY-MM-DD
   incomeDay: number; // Dia de recebimento correspondente
   amount: number;
@@ -47,6 +64,10 @@ export interface Step {
   recipientName: string;
   pixKey: string;
   pixKeyType: 'cpf' | 'cnpj' | 'email' | 'telefone' | 'aleatoria';
+  bankAccountId?: string;
+  paymentMethod?: PaymentMethod;
+  paymentMode?: PaymentMode;
+  singleDueDate?: string; // se pagamento único
   isRecurring: boolean;
   recurrenceInterval?: RecurrenceType;
   deadlineDate: string; // YYYY-MM-DD
@@ -61,6 +82,20 @@ export interface Planning {
   description: string;
   category: string;
   color: string;
+  type: 'direct' | 'container'; // 'direct' = despesa direta (sem etapas), 'container' = com etapas
+  // Campos utilizados quando type === 'direct'
+  totalAmount?: number;
+  recipientName?: string;
+  pixKey?: string;
+  pixKeyType?: 'cpf' | 'cnpj' | 'email' | 'telefone' | 'aleatoria';
+  bankAccountId?: string;
+  paymentMethod?: PaymentMethod;
+  paymentMode?: PaymentMode;
+  singleDueDate?: string;
+  deadlineDate?: string;
+  customSplit?: IncomeDate[];
+  directInstallments?: SplitInstallment[];
+  // Campos utilizados quando type === 'container'
   steps: Step[];
   createdAt: string;
 }
